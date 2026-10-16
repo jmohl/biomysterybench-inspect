@@ -4,7 +4,7 @@ An [Inspect AI](https://inspect.aisi.org.uk/) implementation of [BioMysteryBench
 
 Each problem gives the model a real, anonymised biological dataset (DNA and RNA sequencing, proteomics, metabolomics, methylation, ChIP-seq and others) and asks a question that can only be answered by analysing the data. The model works in a Linux sandbox with common bioinformatics tools and internet access to NCBI, Ensembl, UniProt and the conda and pip channels. It submits a free-form answer, and a model judge grades that answer against the problem's rubric after reading the full transcript.
 
-The benchmark, its problems and its rubrics are Anthropic's work. This repository contains only the Inspect implementation, written by SaferAI.
+The benchmark, its problems and its rubrics are Anthropic's work. This repository contains only the Inspect implementation.
 
 ## Requirements
 
@@ -130,7 +130,7 @@ Anthropic reports mean accuracy over 5 trials on the 73 problems that at least o
 
 The scorer `biomystery_grader` is built on Inspect's `model_graded_qa`. The judge receives the full transcript, the submitted answer and the problem's `answer_rubric`. It returns `GRADE: C` only when the answer matches the rubric and the model did not cheat. Cheating means identifying the source dataset by looking up a GEO, SRA, ENA or BioProject accession, the source publication or the study metadata. Standard database use such as gene or sequence lookup, reference genome download and BLAST is allowed.
 
-The judge comes from the `grader` model role. If the role is not set, grading falls back to the model under test, and that model grades its own answers. SaferAI's runs used `anthropic/claude-opus-4-8` as the grader.
+The judge comes from the `grader` model role. If the role is not set, grading falls back to the model under test, and that model grades its own answers. Runs to date used `anthropic/claude-opus-4-8` as the grader.
 
 A sample that the judge did not grade is left unscored and excluded from accuracy. This happens when the judge's reply contains no `GRADE:` line. Two causes have been seen or are possible. A Claude grader's safety classifier can stop the grader on biological content with `stop_reason="content_filter"` and an empty reply. A transcript longer than the grader's context window ends with `stop_reason="model_length"`. Inspect AI 0.3.245 and later record these samples as unscored and report their number as `unscored_samples` in the log's results for the scorer. The reason is recorded in `Score.reason` on recent releases and in `metadata["unscored_reason"]` on older ones. Earlier versions score them INCORRECT, which is why the package requires 0.3.245.
 
@@ -145,10 +145,10 @@ To find samples that ran out of messages or tokens, read each sample's `limit` f
 ## Known limitations
 
 - **`allowed_domains` is not enforced.** It is carried into sample metadata, but the sandbox has unrestricted network access. The rule against looking up the source study rests on the system prompt and on the judge noticing a lookup in the transcript.
-- **Some problems may never be graded by a Claude judge.** In one SaferAI run of 90 problems with 5 epochs, 9 of 450 grader calls to `claude-opus-4-8` ended with `content_filter`. All 5 epochs of `hb019` were affected. Check `unscored_samples` in each log, and treat a problem with every epoch unscored as missing from the results, not as a zero.
+- **Some problems may never be graded by a Claude judge.** In one run of 90 problems with 5 epochs, 9 of 450 grader calls to `claude-opus-4-8` ended with `content_filter`. All 5 epochs of `hb019` were affected. Check `unscored_samples` in each log, and treat a problem with every epoch unscored as missing from the results, not as a zero.
 - **Image storage is large.** The full set needs about 155 GB of registry storage, and problems with large datasets may need more than the default 32 GB of sandbox memory.
-- **Execution environment.** SaferAI's runs used Kubernetes through inspect_k8s_sandbox. The local Docker path is configured but has not been run end to end on the full set. Local Docker needs a host with at least 4 CPUs unless `cpus` is lowered in `compose.yaml`.
-- **Unsubmitted samples are still graded.** A sample that hits `message_limit` or `token_limit` before calling `submit` goes to the grader like any other. In SaferAI's runs these samples scored INCORRECT. They are identified by `submitted: false` in the score metadata and by the sample's `limit` field in the log.
+- **Execution environment.** Runs to date used Kubernetes through inspect_k8s_sandbox. The local Docker path is configured but has not been run end to end on the full set. Local Docker needs a host with at least 4 CPUs unless `cpus` is lowered in `compose.yaml`.
+- **Unsubmitted samples are still graded.** A sample that hits `message_limit` or `token_limit` before calling `submit` goes to the grader like any other. In runs to date these samples scored INCORRECT. They are identified by `submitted: false` in the score metadata and by the sample's `limit` field in the log.
 
 ## Future work
 
@@ -168,7 +168,7 @@ Most tests run offline. They mock the HuggingFace download and the models and do
 
 ## Licence and attribution
 
-The code is released under the MIT licence (see [LICENSE](LICENSE)). It was first written in SaferAI's fork of the UK AI Security Institute's [inspect_evals](https://github.com/UKGovernmentBEIS/inspect_evals) and follows that repository's structure and conventions. The licence keeps the UK AI Security Institute's copyright notice for that reason.
+The code is released under the MIT licence (see [LICENSE](LICENSE)). It was first written in a fork of the UK AI Security Institute's [inspect_evals](https://github.com/UKGovernmentBEIS/inspect_evals) and follows that repository's structure and conventions. The licence keeps the UK AI Security Institute's copyright notice for that reason.
 
 BioMysteryBench was created by Anthropic. Cite Anthropic's [research page](https://www.anthropic.com/research/Evaluating-Claude-For-Bioinformatics-With-BioMysteryBench) and the HuggingFace datasets when publishing results.
 
