@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "biomysterybench"
+version = "0.1.0"
+description = "BioMysteryBench, Anthropic's agentic bioinformatics benchmark, as an Inspect AI evaluation"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "SaferAI" }]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+# inspect_ai 0.3.245 is the first release in which model_graded_qa leaves a sample
+# unscored when the grader returns no grade. Earlier releases score it INCORRECT.
+dependencies = [
+    "inspect_ai>=0.3.245",
+    "huggingface_hub>=0.24",
+]
+
+# Model provider SDKs and the Kubernetes sandbox provider are optional. The
+# minimums are the ones inspect_ai 0.3.245 checks, and newer inspect_ai releases
+# check their own higher minimums at run time.
+[project.optional-dependencies]
+openai = ["openai>=2.40"]
+anthropic = ["anthropic>=0.115"]
+k8s = ["inspect-k8s-sandbox"]
+
+[project.urls]
+Homepage = "https://github.com/safer-ai/biomysterybench-inspect"
+Issues = "https://github.com/safer-ai/biomysterybench-inspect/issues"
+
+[project.entry-points.inspect_ai]
+biomysterybench = "biomysterybench"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pyyaml>=6.0",
+    "ruff>=0.12",
+    "mypy>=1.11",
+    "types-PyYAML",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/biomysterybench"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-rA --durations=10"
+markers = [
+    "install: installs the package into a fresh virtual environment with uv",
+]
+
+[tool.ruff]
+src = ["src"]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "D", "I", "UP"]
+ignore = ["E501", "D10", "D212"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+warn_unused_ignores = true
+strict_equality = true

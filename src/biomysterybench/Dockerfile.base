@@ -1,0 +1,29 @@
+# Base sandbox image for BioMysteryBench: the bioinformatics toolset shared by every
+# problem. Per-problem images are built FROM this and add that problem's data under
+# data/ (see Dockerfile and build_and_push.sh).
+
+FROM condaforge/miniforge3:24.9.2-0
+
+SHELL ["/bin/bash", "-lc"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        unzip curl wget ca-certificates git procps less build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mamba install -y -n base -c conda-forge -c bioconda \
+        python=3.11 \
+        samtools bcftools htslib bedtools seqkit \
+        bwa bowtie2 minimap2 star salmon subread \
+        blast hmmer mafft fastqc \
+    && mamba clean -a -y
+
+RUN pip install --no-cache-dir \
+        biopython==1.85 \
+        pysam==0.22.1 \
+        pyfaidx==0.8.1.3 \
+        pandas==2.2.3 \
+        numpy==2.1.3 \
+        scipy==1.14.1 \
+        scikit-learn==1.5.2
+
+WORKDIR /workspace
