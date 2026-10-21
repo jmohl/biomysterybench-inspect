@@ -11,7 +11,7 @@ The benchmark, its problems and its rubrics are Anthropic's work. This repositor
 - Python 3.10 or later and [uv](https://docs.astral.sh/uv/).
 - `inspect_ai` 0.3.245 or later. The package requires it, and the [Scoring](#scoring) section explains why.
 - Docker, or a Kubernetes cluster with [inspect_k8s_sandbox](https://k8s-sandbox.aisi.org.uk/). Each sandbox uses 4 CPUs and 32 GB of memory by default.
-- A container registry you can push to and pull from. The per-problem images total about 155 GB for the full set.
+- A container registry you can push to and pull from. The per-problem images total about 155 GB for the full set. With [run-time staging](#staging-data-at-run-time) only the base image (about 5 GB, no benchmark data) goes in a registry.
 - A HuggingFace token with access to the gated full dataset (see [Dataset access and terms](#dataset-access-and-terms)). The preview set needs no token, either to build its images or to run it.
 - API access to a grader model and to the model under test, and the provider's Python SDK (see [Installation](#installation)).
 
@@ -87,6 +87,33 @@ The preview bundle stays in the HuggingFace cache and is reused by every problem
 
 To build a single problem image by hand, tag the base image as `base:latest` first, because the `Dockerfile` defaults `BASE` to `base`. The script always passes `BASE` itself, set to `BP_BASE_TAG` (default `<BP_PREFIX>base`).
 
+## Staging data at run time
+
+Instead of one image per problem, every sample can start from the shared base image and download its problem's data when the sample starts. Pass `-T data_source=hf` and the base image:
+
+```bash
+HF_TOKEN=hf_... uv run inspect eval biomysterybench/bio_mystery_bench \
+  -T source=full -T data_source=hf \
+  -T base_image=registry.example.com/biomystery@sha256:<digest> \
+  --model openai/gpt-5 \
+  --model-role grader=anthropic/claude-opus-4-8
+```
+
+Before the agent starts, the `stage_problem_data` setup step:
+
+1. resolves a short-lived URL for the problem's archive in the process running Inspect. With `hf` this is the signed CDN link HuggingFace redirects to, which needs no token and expires after about an hour. With `s3` it is a presigned URL into a mirror of the archives (see below).
+2. writes the URL into the sandbox with sandbox events turned off, so it is not recorded in the eval log;
+3. downloads the archive to `/tmp/bmb-stage/` in the sandbox, outside the agent's working directory, and checks its size and sha256 against `manifest.json`;
+4. extracts it into `/workspace/data/` exactly as `build_and_push.sh` does (the preview bundle is flattened from `<id>/`) and deletes the archive and the URL.
+
+`HF_TOKEN` and AWS credentials never enter the sandbox. This matters because the agent has internet access: with the token it could download `problems.csv`, which holds the rubrics of the gated full set. Each attempt resolves a fresh URL. After 3 failed attempts the sample is marked ERRORED, so it is eligible for `--retry-on-error` and is not scored as a wrong answer. The task records the staging time, archive size and extracted size in the sample's `bmb_staging` metadata.
+
+Pin the base image by digest. `Dockerfile.base` does not pin its conda packages, so a rebuild under the same tag can change the tools. The task logs a warning when the base image has no digest.
+
+For `-T data_source=s3`, copy each archive to `s3://<bucket>/<prefix>/<repo>/<revision>/<archive path>` (for example `.../Anthropic/BioMysteryBench-full/b5a889c.../data/hb002.zip`), install the `s3` extra for `boto3`, and pass `-T s3_uri=s3://<bucket>/<prefix>` or set `BMB_S3_URI`. The URL is presigned with the AWS credentials of the process running Inspect.
+
+`manifest.json` holds each problem's archive path, size, LFS sha256, size tier and `human_solvable` flag at the pinned revisions, and no problem text. Regenerate it with `HF_TOKEN=hf_... uv run python scripts/make_manifest.py` whenever a revision changes. The task refuses to run if the manifest's revision differs from the pinned one.
+
 ## Running
 
 Set the same prefix you built with, then run the task with a grader model:
@@ -117,8 +144,14 @@ Anthropic reports mean accuracy over 5 trials on the 73 problems that at least o
 - `ids` (`str | list[str] | None`): run only these problem ids. Accepts a list or a single id. Default `None`.
 - `limit` (`int | None`): keep only the first N problems after filtering. Must be zero or more. Default `None`.
 - `human_solvable_only` (`bool`): keep only problems that at least one human solved. Default `False`.
-- `image_prefix` (`str | None`): per-problem image prefix. A sample's image is `image_prefix + problem_id`. Defaults to the `BMB_IMAGE_PREFIX` environment variable.
+- `tier` (`str | list[str] | None`): keep only problems whose archive is in these size tiers: `"small"` (under 2 GB, 76 problems), `"medium"` (2 to 10 GB, 8) or `"large"` (10 GB or more, 6). Read from `manifest.json`. Default `None`.
+- `data_source` (`str`): `"image"` uses the per-problem images. `"hf"` or `"s3"` stage the data at run time (see [Staging data at run time](#staging-data-at-run-time)). Default `"image"`.
+- `image_prefix` (`str | None`): per-problem image prefix. A sample's image is `image_prefix + problem_id`. Defaults to the `BMB_IMAGE_PREFIX` environment variable. Used only with `data_source="image"`.
+- `base_image` (`str | None`): the shared base image for `data_source` `"hf"` or `"s3"`, ideally pinned by digest. Defaults to the `BMB_BASE_IMAGE` environment variable.
+- `s3_uri` (`str | None`): `s3://bucket/prefix` of the archive mirror for `data_source="s3"`. Defaults to the `BMB_S3_URI` environment variable.
 - `sandbox_memory` (`str`): memory for each sandbox as a docker compose byte value such as `"32G"` or `"512M"`. On Kubernetes this is both the memory request and the memory limit of the pod. Default `"32G"`.
+- `sandbox_disk` (`str | None`): ephemeral storage for each sandbox as a Kubernetes quantity such as `"50Gi"`, set as both the request and the limit of the pod through `compose_disk.yaml`. Kubernetes schedules the pod only on a node with that much free disk and evicts it if it writes more. Docker ignores it. Default `None`, which sets no disk request.
+- `stage_timeout` (`int`): seconds allowed for one download and extraction when staging. Default `7200`.
 - `with_sandbox` (`bool`): attach the sandbox. `False` builds the task without one, for offline tests. Default `True`.
 - `epochs` (`int`): trials per problem. Default `1`.
 - `tool_timeout` (`int`): timeout for each bash or python call in seconds. Default `600`.
@@ -139,6 +172,7 @@ Each score's metadata also records:
 - `submitted`, which is `True` only when the agent called the `submit` tool.
 - `problem_id` and `human_solvable`.
 - `stop_reason`, the stop reason of the model's last generation. It describes that one generation, not why the sample ended.
+- `sandbox_resources`, read from the sandbox at scoring time: `memory_peak_bytes` (cgroup `memory.peak`, which includes page cache, so it is an upper bound on what the agent's processes needed), `oom_kills` (processes the kernel killed at the memory limit) and `workspace_bytes` (`du` of `/workspace`). A value the sandbox does not expose is `null`. These are for sizing sandboxes.
 
 To find samples that ran out of messages or tokens, read each sample's `limit` field in the log. Inspect sets it to the limit that ended the sample (for example `type="message"`), and leaves it empty for a sample that finished normally.
 
@@ -173,6 +207,13 @@ The code is released under the MIT licence (see [LICENSE](LICENSE)). It was firs
 BioMysteryBench was created by Anthropic. Cite Anthropic's [research page](https://www.anthropic.com/research/Evaluating-Claude-For-Bioinformatics-With-BioMysteryBench) and the HuggingFace datasets when publishing results.
 
 ## Changelog
+
+### Unreleased (2-B)
+
+- Add run-time data staging: the `data_source`, `base_image`, `s3_uri` and `stage_timeout` task arguments, the `stage_problem_data` setup step and `manifest.json`. The default, `data_source="image"`, behaves as before.
+- Add the `tier` and `sandbox_disk` task arguments, and `compose_disk.yaml`.
+- Record `sandbox_resources` in the score metadata, and `data_source`, `base_image`, the dataset revision and the harness commit in the task metadata.
+- The version stays 2-B: every addition is optional and the defaults are unchanged. Staged data was checked file by file (sha256, mode and owner) against the per-problem images for the 5 preview problems and 5 full-set problems.
 
 ### [2-B] - 2026-09-24
 

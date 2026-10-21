@@ -42,10 +42,11 @@ SUBMIT_TOOL = "submit"
 
 @solver
 def require_problem_data(data_dir: str = DATA_DIR) -> Solver:
-    """Raise if the per-problem image did not deliver its data.
+    """Raise if the sandbox does not hold the problem's data.
 
-    The task depends on `data/` being populated by the image. An empty archive or
-    the wrong image leaves the agent nothing to analyse, which is an infrastructure
+    The task depends on `data/` being populated, by the per-problem image or by
+    staging. An empty archive or the wrong image leaves the agent nothing to
+    analyse, which is an infrastructure
     failure rather than a model verdict. Raising marks the sample ERRORED, so it is
     eligible for `--retry-on-error` and is counted as a failure, not a wrong answer.
 
@@ -60,8 +61,9 @@ def require_problem_data(data_dir: str = DATA_DIR) -> Solver:
         if not result.success or not result.stdout.strip():
             raise RuntimeError(
                 f"BioMysteryBench problem {state.sample_id}: '{data_dir}/' is empty or "
-                f"missing in image {state.metadata.get('BMB_IMAGE')!r}. The per-problem "
-                "image did not deliver its data; rebuild it with build_and_push.sh."
+                f"missing in image {state.metadata.get('BMB_IMAGE')!r}. The sandbox "
+                "did not deliver its data: rebuild the per-problem image with "
+                "build_and_push.sh, or check the staging step."
             )
         return state
 
@@ -77,6 +79,7 @@ def biomystery_solver(
     system_prompt: str | None = None,
     submit_description: str | None = None,
     check_data: bool = True,
+    stage: Solver | None = None,
 ) -> Solver:
     """Open-ended agentic solver for BioMysteryBench.
 
@@ -94,9 +97,14 @@ def biomystery_solver(
         submit_description: override the submit-tool description.
         check_data: verify the sandbox actually contains the problem's data before
             the agent starts. Set False only when running without a sandbox.
+        stage: setup solver that puts the problem data into the sandbox before
+            the check (see staging.stage_problem_data). None when the image
+            already holds the data.
     """
     resolved_system = DEFAULT_SYSTEM_PROMPT if system_prompt is None else system_prompt
     init: list[Solver] = []
+    if stage is not None:
+        init.append(stage)
     if check_data:
         init.append(require_problem_data())
     if resolved_system:

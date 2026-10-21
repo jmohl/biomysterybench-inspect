@@ -429,6 +429,9 @@ k8s = [
 openai = [
     { name = "openai" },
 ]
+s3 = [
+    { name = "boto3" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -442,12 +445,13 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.115" },
+    { name = "boto3", marker = "extra == 's3'" },
     { name = "huggingface-hub", specifier = ">=0.24" },
     { name = "inspect-ai", specifier = ">=0.3.245" },
     { name = "inspect-k8s-sandbox", marker = "extra == 'k8s'" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=2.40" },
 ]
-provides-extras = ["openai", "anthropic", "k8s"]
+provides-extras = ["openai", "anthropic", "k8s", "s3"]
 
 [package.metadata.requires-dev]
 dev = [

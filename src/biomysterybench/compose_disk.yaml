@@ -1,0 +1,20 @@
+# compose.yaml plus an ephemeral-storage request and limit, used when the
+# sandbox_disk task argument is set. Keep the two files in step.
+#
+# Kubernetes evicts a pod that writes more than its ephemeral-storage limit, and
+# schedules it only on a node with that much free disk. Docker ignores the
+# x-inspect_k8s_sandbox block.
+services:
+  default:
+    image: ${SAMPLE_METADATA_BMB_IMAGE}
+    init: true
+    command: tail -f /dev/null
+    mem_limit: ${SAMPLE_METADATA_BMB_MEMORY}
+    cpus: 4
+    network_mode: bridge
+    x-inspect_k8s_sandbox:
+      resources:
+        requests:
+          ephemeral-storage: ${SAMPLE_METADATA_BMB_DISK}
+        limits:
+          ephemeral-storage: ${SAMPLE_METADATA_BMB_DISK}

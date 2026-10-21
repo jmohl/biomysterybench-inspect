@@ -32,6 +32,8 @@ dependencies = [
 openai = ["openai>=2.40"]
 anthropic = ["anthropic>=0.115"]
 k8s = ["inspect-k8s-sandbox"]
+# Presigns URLs into an S3 mirror of the archives for data_source="s3".
+s3 = ["boto3"]
 
 [project.urls]
 Homepage = "https://github.com/safer-ai/biomysterybench-inspect"

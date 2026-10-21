@@ -11,8 +11,20 @@ from inspect_ai.scorer import (
     stderr,
 )
 from inspect_ai.solver import TaskState
+from inspect_ai.util import sandbox
 
 from biomysterybench.solver import SUBMIT_TOOL
+
+# Reads the sandbox's own cgroup (v2, then v1) and the size of /workspace.
+# memory.peak includes page cache, so it is an upper bound on what the agent's
+# processes needed; oom_kill counts processes the kernel killed at the limit.
+_TELEMETRY_SCRIPT = r"""
+cg=/sys/fs/cgroup
+peak=$(cat $cg/memory.peak 2>/dev/null || cat $cg/memory/memory.max_usage_in_bytes 2>/dev/null || echo -)
+oom=$(awk '$1 == "oom_kill" {print $2}' $cg/memory.events 2>/dev/null)
+ws=$(du -sb /workspace 2>/dev/null | cut -f1)
+echo "${peak:--} ${oom:--} ${ws:--}"
+"""
 
 # include_history=True puts the transcript in {question}, not {answer}.
 BMB_GRADER_TEMPLATE = """
@@ -54,6 +66,7 @@ def biomystery_grader(
     template: str | None = None,
     instructions: str | None = None,
     include_history: bool = True,
+    telemetry: bool = True,
 ) -> Scorer:
     """Model-graded BioMysteryBench scorer (rubric plus anti-cheat, transcript-aware).
 
@@ -63,6 +76,8 @@ def biomystery_grader(
         include_history: give the judge the full transcript (default True; needed
             for the anti-cheat audit). Set False to grade the final answer only
             (cheaper, but cannot detect accession-lookup cheating).
+        telemetry: record the sandbox's peak memory, OOM kills and /workspace
+            size in the score metadata, for sizing sandboxes. Needs a sandbox.
 
     Score metadata records `submitted`, which is True only when the agent called
     the submit tool. A sample that ran out of messages or tokens first is still
@@ -92,6 +107,8 @@ def biomystery_grader(
         meta["problem_id"] = state.metadata.get("problem_id") or state.sample_id
         meta["submitted"] = submitted(state)
         meta["stop_reason"] = state.output.stop_reason if state.output else None
+        if telemetry:
+            meta["sandbox_resources"] = await sandbox_resources()
         # Copy so every other field of the inner score survives, including why
         # a sample the grader could not judge was left unscored.
         return result.model_copy(update={"metadata": meta})
@@ -105,3 +122,21 @@ def submitted(state: TaskState) -> bool:
         isinstance(m, ChatMessageTool) and m.function == SUBMIT_TOOL
         for m in state.messages
     )
+
+
+async def sandbox_resources() -> dict[str, int | None] | None:
+    """Peak memory, OOM kills and /workspace size of the sample's sandbox.
+
+    Read at scoring time, so it covers the whole sample, including samples that
+    ended on a message or token limit. Returns None if the sandbox cannot be
+    read; a value the sandbox does not expose is None.
+    """
+    try:
+        result = await sandbox().exec(["sh", "-c", _TELEMETRY_SCRIPT], timeout=600)
+    except Exception:  # noqa: BLE001
+        return None
+    fields = result.stdout.split() if result.success else []
+    if len(fields) != 3:
+        return None
+    peak, oom, workspace = (int(f) if f.isdigit() else None for f in fields)
+    return {"memory_peak_bytes": peak, "oom_kills": oom, "workspace_bytes": workspace}

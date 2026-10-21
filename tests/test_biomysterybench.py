@@ -273,7 +273,7 @@ def test_ids_accepts_a_bare_string(monkeypatch):
     """
     rows = [
         {"id": "hb002", "question": "q", "answer_rubric": "r", "human_solvable": "yes"},
-        {"id": "hb003", "question": "q", "answer_rubric": "r", "human_solvable": "yes"},
+        {"id": "hb020", "question": "q", "answer_rubric": "r", "human_solvable": "yes"},
     ]
     monkeypatch.setattr(bmb, "_load_problems", lambda *a, **k: rows)
     task = bio_mystery_bench(
