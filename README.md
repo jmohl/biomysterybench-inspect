@@ -150,7 +150,7 @@ Anthropic reports mean accuracy over 5 trials on the 73 problems that at least o
 - `base_image` (`str | None`): the shared base image for `data_source` `"hf"` or `"s3"`, ideally pinned by digest. Defaults to the `BMB_BASE_IMAGE` environment variable.
 - `s3_uri` (`str | None`): `s3://bucket/prefix` of the archive mirror for `data_source="s3"`. Defaults to the `BMB_S3_URI` environment variable.
 - `sandbox_memory` (`str`): memory for each sandbox as a docker compose byte value such as `"32G"` or `"512M"`. On Kubernetes this is both the memory request and the memory limit of the pod. Default `"32G"`.
-- `sandbox_disk` (`str | None`): ephemeral storage for each sandbox as a Kubernetes quantity such as `"50Gi"`, set as both the request and the limit of the pod through `compose_disk.yaml`. Kubernetes schedules the pod only on a node with that much free disk and evicts it if it writes more. Docker ignores it. Default `None`, which sets no disk request.
+- `sandbox_disk` (`str | None`): ephemeral storage for each sandbox as a Kubernetes quantity such as `"50Gi"`, set as both the request and the limit of the pod through `disk-compose.yaml`. Kubernetes schedules the pod only on a node with that much free disk and evicts it if it writes more. Docker ignores it. Default `None`, which sets no disk request.
 - `stage_timeout` (`int`): seconds allowed for one download and extraction when staging. Default `7200`.
 - `with_sandbox` (`bool`): attach the sandbox. `False` builds the task without one, for offline tests. Default `True`.
 - `epochs` (`int`): trials per problem. Default `1`.
@@ -211,7 +211,7 @@ BioMysteryBench was created by Anthropic. Cite Anthropic's [research page](https
 ### Unreleased (2-B)
 
 - Add run-time data staging: the `data_source`, `base_image`, `s3_uri` and `stage_timeout` task arguments, the `stage_problem_data` setup step and `manifest.json`. The default, `data_source="image"`, behaves as before.
-- Add the `tier` and `sandbox_disk` task arguments, and `compose_disk.yaml`.
+- Add the `tier` and `sandbox_disk` task arguments, and `disk-compose.yaml` (named so that it ends in `compose.yaml`, which Kubernetes conversion requires).
 - Record `sandbox_resources` in the score metadata, and `data_source`, `base_image`, the dataset revision and the harness commit in the task metadata.
 - The version stays 2-B: every addition is optional and the defaults are unchanged. Staged data was checked file by file (sha256, mode and owner) against the per-problem images for the 5 preview problems and 5 full-set problems.
 

@@ -222,6 +222,15 @@ def test_compose_sets_memory_limit_from_sample_metadata():
     assert service["image"] == "repo:hb002"
 
 
+@pytest.mark.parametrize("compose", [bmb._COMPOSE, bmb._COMPOSE_DISK])
+def test_compose_files_are_named_for_k8s_conversion(compose):
+    """k8s_sandbox converts a file only if its name ends in compose.yaml or compose.yml.
+
+    Any other name is passed to Helm as raw values, which the chart rejects.
+    """
+    assert Path(compose).name.endswith(("compose.yaml", "compose.yml"))
+
+
 def test_compose_sets_fixed_cpu_limit():
     """The k8s compose converter turns cpus into the pod's CPU request and limit."""
     service = yaml.safe_load(Path(bmb._COMPOSE).read_text())["services"]["default"]

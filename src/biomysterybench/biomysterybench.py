@@ -52,7 +52,9 @@ PREVIEW_REVISION = "51c9024021b8989a0cb06ae623b02f90d14c2da3"
 
 _COMPOSE = str(Path(__file__).parent / "compose.yaml")
 # compose.yaml plus an ephemeral-storage request and limit for Kubernetes.
-_COMPOSE_DISK = str(Path(__file__).parent / "compose_disk.yaml")
+# The name must end in compose.yaml: k8s_sandbox (and Hawk) only convert files named
+# that way, and pass any other file to Helm as raw values.
+_COMPOSE_DISK = str(Path(__file__).parent / "disk-compose.yaml")
 
 # A sample's image tag is this prefix + the problem id. Set the prefix (your image
 # repo, e.g. registry.example.com/biomystery:) at run time via BMB_IMAGE_PREFIX or
@@ -108,7 +110,7 @@ def _make_sample(
         "BMB_MEMORY": sandbox_memory,
     }
     if sandbox_disk is not None:
-        # Substituted into compose_disk.yaml as ${SAMPLE_METADATA_BMB_DISK}.
+        # Substituted into disk-compose.yaml as ${SAMPLE_METADATA_BMB_DISK}.
         meta["BMB_DISK"] = sandbox_disk
     if archive is not None:
         meta["tier"] = archive.tier
