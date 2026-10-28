@@ -127,16 +127,16 @@ uv run inspect eval biomysterybench/bio_mystery_bench \
   --model openai/gpt-5 \
   --model-role grader=anthropic/claude-opus-4-8
 
-# full 90-problem set, 5 one-shot trials per problem (upstream's protocol)
+# full 90-problem set, 5 trials per problem
 HF_TOKEN=hf_... uv run inspect eval biomysterybench/bio_mystery_bench \
-  -T source=full -T epochs=5 -T max_attempts=1 \
+  -T source=full -T epochs=5 \
   --model openai/gpt-5 \
   --model-role grader=anthropic/claude-opus-4-8
 ```
 
 The default sandbox is Inspect's `docker` provider, configured by `src/biomysterybench/compose.yaml`. To run on Kubernetes, install the `k8s` extra (see [Installation](#installation)), configure `kubectl` access to your cluster as the [inspect_k8s_sandbox documentation](https://k8s-sandbox.aisi.org.uk/) describes, and pass `--sandbox k8s:src/biomysterybench/compose.yaml`. The k8s provider converts the compose file and sets both the request and the limit of each pod to the compose values.
 
-Anthropic reports mean accuracy over 5 one-shot trials on the 73 problems that at least one human benchmarker solved. Pass `-T human_solvable_only=true -T max_attempts=1` to match that setup.
+Anthropic reports mean accuracy over 5 one-shot trials on the 73 problems that at least one human benchmarker solved. Pass `-T human_solvable_only=true` to restrict a run to that subset.
 
 ### Task arguments
 
@@ -158,11 +158,11 @@ Anthropic reports mean accuracy over 5 one-shot trials on the 73 problems that a
 - `message_limit` (`int | None`): maximum number of messages in a sample, shared by all its submissions. Default `150`.
 - `token_limit` (`int | None`): optional limit on the agent's tokens in a sample. Grader tokens do not count toward it. Default `None`.
 - `max_tool_output` (`int | None`): truncate each tool result to this many bytes. `None` uses Inspect's default. Default `None`.
-- `max_attempts` (`int`): submissions the agent may make per sample (see [Multiple submissions](#multiple-submissions)). `1` is upstream's one-shot protocol. Must be 1 or more. Default `5`.
+- `max_attempts` (`int`): submissions the agent may make per sample (see [Multiple submissions](#multiple-submissions)). `1` is upstream's one-shot protocol. Must be 1 or more. Default `1`.
 
 ### Multiple submissions
 
-By default the agent may submit up to 5 times. Each submission except the last is graded when it is made, by the same grader as the final score. A correct submission ends the sample. After an incorrect one the agent is told only "Your submission was incorrect. Please proceed and attempt to find the correct answer.", never the grader's reasoning or the rubric, and it keeps working. The last submission is graded at the end of the sample, as in a one-shot run. The system prompt does not tell the agent how many submissions it has. This is the mechanism of LabBench2's `agentic_max_attempts`.
+By default the agent submits once, as upstream. With `-T max_attempts=5` it may submit up to 5 times. Each submission except the last is graded when it is made, by the same grader as the final score. A correct submission ends the sample. After an incorrect one the agent is told only "Your submission was incorrect. Please proceed and attempt to find the correct answer.", never the grader's reasoning or the rubric, and it keeps working. The last submission is graded at the end of the sample, as in a one-shot run. The system prompt does not tell the agent how many submissions it has. This is the mechanism of LabBench2's `agentic_max_attempts`.
 
 `message_limit` and `token_limit` are shared by all the submissions. Each incorrect submission uses 3 messages: the `submit` call, its result and the reply.
 
@@ -170,7 +170,8 @@ By default the agent may submit up to 5 times. Each submission except the last i
 
 | Protocol | Task arguments |
 |---|---|
-| Up to 5 submissions in one trial (default) | `-T max_attempts=5 -T epochs=1` |
+| One-shot, one trial (default) | `-T max_attempts=1 -T epochs=1` |
+| Up to 5 submissions in one trial | `-T max_attempts=5 -T epochs=1` |
 | pass@5: 5 independent one-shot trials | `-T max_attempts=1 -T epochs=5` |
 | Both | `-T max_attempts=5 -T epochs=5` |
 
@@ -237,13 +238,13 @@ BioMysteryBench was created by Anthropic. Cite Anthropic's [research page](https
 
 ### [3-B] - 2026-10-28
 
-- Add the `max_attempts` task argument, default `5`: the agent may submit up to 5 times and is told only that a wrong submission was incorrect (see [Multiple submissions](#multiple-submissions)). `max_attempts=1` keeps the one-shot protocol.
+- Add the `max_attempts` task argument. The default, `1`, keeps the one-shot protocol. With `max_attempts=5` the agent may submit up to 5 times and is told only that a wrong submission was incorrect (see [Multiple submissions](#multiple-submissions)).
 - With more than one submission allowed, the judge's instructions say that earlier submissions were judged incorrect.
 - After a limit or context overflow that follows a submission, the last submission is graded instead of the model's last text.
 - The judge is asked up to 3 times before a sample is left unscored.
 - Grader tokens no longer count toward `token_limit`.
 - Record `n_submissions`, `attempt_grades`, `first_attempt_correct`, `graded_last_submission` and `grader_attempts` in the score metadata, and `max_attempts` in the task metadata.
-- Results are not comparable with 2-B, whose only protocol was one-shot. A run with `max_attempts=1` differs from 2-B only through the judge retry.
+- A default (one-shot) run differs from 2-B only through the judge retry, which can score a sample that 2-B left unscored, so the comparability number changes. Runs with `max_attempts` above 1 are a different protocol and are not comparable with any one-shot run.
 - Add run-time data staging: the `data_source`, `base_image`, `s3_uri` and `stage_timeout` task arguments, the `stage_problem_data` setup step and `manifest.json`. The default, `data_source="image"`, behaves as before. Staged data was checked file by file (sha256, mode and owner) against the per-problem images for the 5 preview problems and 5 full-set problems.
 - Add the `tier` and `sandbox_disk` task arguments, and `disk-compose.yaml` (named so that it ends in `compose.yaml`, which Kubernetes conversion requires).
 - Record `sandbox_resources` in the score metadata, and `data_source`, `base_image`, the dataset revision and the harness commit in the task metadata.

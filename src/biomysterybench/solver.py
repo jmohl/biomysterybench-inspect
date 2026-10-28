@@ -40,8 +40,9 @@ INCORRECT_SUBMISSION_MESSAGE = (
     "answer."
 )
 
-# Submissions the agent may make per sample. 1 is upstream's one-shot protocol.
-DEFAULT_MAX_ATTEMPTS = 5
+# Submissions the agent may make per sample. The default, 1, is upstream's
+# one-shot protocol.
+DEFAULT_MAX_ATTEMPTS = 1
 
 DATA_DIR = "data"
 

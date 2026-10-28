@@ -389,6 +389,13 @@ def test_grader_tokens_do_not_count_toward_the_token_limit(tmp_path):
     assert sample.scores["biomystery_grader"].metadata["n_submissions"] == 3
 
 
+def test_task_defaults_to_one_shot(monkeypatch):
+    """Without max_attempts the task keeps upstream's one-shot protocol."""
+    monkeypatch.setattr(bmb, "_load_problems", lambda *a, **k: [_REC])
+    task = bio_mystery_bench(source="preview", image_prefix="repo:")
+    assert task.metadata["max_attempts"] == 1
+
+
 def test_max_attempts_must_be_positive():
     with pytest.raises(ValueError, match="max_attempts must be 1 or more"):
         biomystery_solver(max_attempts=0)
