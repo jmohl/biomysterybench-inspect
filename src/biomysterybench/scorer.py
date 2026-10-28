@@ -1,19 +1,32 @@
 """Model-graded scorer for BioMysteryBench."""
 
+import math
+from copy import copy
+
 from inspect_ai.model import ChatMessageTool
 from inspect_ai.scorer import (
+    CORRECT,
     Score,
     Scorer,
     Target,
+    Value,
     accuracy,
     model_graded_qa,
     scorer,
     stderr,
 )
 from inspect_ai.solver import TaskState
-from inspect_ai.util import sandbox
+from inspect_ai.util import sandbox, suspend_token_limit
 
-from biomysterybench.solver import SUBMIT_TOOL
+from biomysterybench.solver import DEFAULT_MAX_ATTEMPTS, SUBMIT_TOOL
+
+# The grader is called again when it returns no grade (no parseable GRADE line,
+# or a content_filter block, which can clear on a retry), up to this many calls.
+MAX_GRADER_ATTEMPTS = 3
+
+# Sample metadata key listing the grade of each submission graded mid-run, in
+# order. An unscored grade is recorded as None.
+ATTEMPTS_KEY = "bmb_attempts"
 
 # Reads the sandbox's own cgroup (v2, then v1) and the size of /workspace.
 # memory.peak includes page cache, so it is an upper bound on what the agent's
@@ -60,6 +73,15 @@ BMB_GRADER_INSTRUCTIONS = (
     "'GRADE: I' otherwise."
 )
 
+# Prepended to the instructions when the agent may submit more than once.
+BMB_MULTI_ATTEMPT_NOTE = (
+    "The model was allowed several submissions. After each submission but the last "
+    "it was told only that the submission was incorrect, so any earlier submission in "
+    "the transcript was judged incorrect. Grade only the final submitted answer "
+    "above, and apply the cheating check to the whole transcript, including the work "
+    "before earlier submissions.\n\n"
+)
+
 
 @scorer(metrics=[accuracy(), stderr()])
 def biomystery_grader(
@@ -67,6 +89,7 @@ def biomystery_grader(
     instructions: str | None = None,
     include_history: bool = True,
     telemetry: bool = True,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> Scorer:
     """Model-graded BioMysteryBench scorer (rubric plus anti-cheat, transcript-aware).
 
@@ -78,34 +101,85 @@ def biomystery_grader(
             (cheaper, but cannot detect accession-lookup cheating).
         telemetry: record the sandbox's peak memory, OOM kills and /workspace
             size in the score metadata, for sizing sandboxes. Needs a sandbox.
+        max_attempts: submissions the solver accepts. Above 1, the grader is
+            told that earlier submissions in the transcript were judged
+            incorrect, and the default instructions say so.
 
-    Score metadata records `submitted`, which is True only when the agent called
-    the submit tool. A sample that ran out of messages or tokens first is still
-    graded, and the sample's `limit` field in the log records which limit ended
-    it. `stop_reason` is the stop reason of the model's last generation, not of
-    the sample.
+    The grader is called again, up to MAX_GRADER_ATTEMPTS calls, while it
+    returns no grade. Its tokens do not count toward the agent's token limit.
+    The solver calls this scorer mid-run for every submission but the last, and
+    each of those grades is recorded in the sample metadata under ATTEMPTS_KEY.
+
+    Score metadata records:
+        submitted: True when the agent called the submit tool. A sample that
+            ran out of messages or tokens first is still graded, and the
+            sample's `limit` field in the log records which limit ended it.
+        n_submissions: the number of submit calls.
+        attempt_grades: the grades given mid-run, in order, then this grade.
+            An unscored grade is None. A submission graded correct mid-run is
+            graded again at the end, so it appears twice.
+        first_attempt_correct: whether the first graded answer was correct,
+            for comparison with one-shot runs. None when it was unscored.
+        graded_last_submission: True when the sample ended (on a limit or a
+            context overflow) after a submission without a new one, so the
+            last submission was graded instead of the model's last text.
+        grader_attempts: grader calls used for this grade.
+        stop_reason: the stop reason of the model's last generation, not of
+            the sample.
 
     Note:
         The judge comes from the `grader` model role. Set it with
         `--model-role grader=<model>` or `model_roles`, or grading falls back to
         the target model and the model grades itself.
     """
+    if instructions is None:
+        instructions = BMB_GRADER_INSTRUCTIONS
+        if max_attempts > 1:
+            instructions = BMB_MULTI_ATTEMPT_NOTE + instructions
     inner = model_graded_qa(
         template=template or BMB_GRADER_TEMPLATE,
-        instructions=instructions or BMB_GRADER_INSTRUCTIONS,
+        instructions=instructions,
         include_history=include_history,
         partial_credit=False,
         model_role="grader",
     )
 
     async def score(state: TaskState, target: Target) -> Score | None:
-        result = await inner(state, target)
+        answers = submissions(state)
+        # After a limit or a context overflow, output.completion is the model's
+        # last text, not an answer. Grade the last submission instead, on a copy
+        # so that the logged output is unchanged.
+        graded_last = bool(answers) and answers[-1] != state.output.completion
+        graded = _with_completion(state, answers[-1]) if graded_last else state
+
+        # Mid-run, grader tokens would otherwise count toward the agent's limit.
+        with suspend_token_limit():
+            for grader_attempts in range(1, MAX_GRADER_ATTEMPTS + 1):
+                result = await inner(graded, target)
+                if result is None or _grade(result.value) is not None:
+                    break
         if result is None:
             return None
+
+        grade = _grade(result.value)
+        earlier = list(state.metadata.get(ATTEMPTS_KEY, []))
+        # Inspect marks the state completed before the end-of-sample score, so
+        # an uncompleted state means the solver is grading a submission mid-run.
+        if not state.completed:
+            state.metadata[ATTEMPTS_KEY] = earlier + [grade]
+        attempt_grades = earlier + [grade]
+
         meta = dict(result.metadata or {})
         meta["human_solvable"] = state.metadata.get("human_solvable")
         meta["problem_id"] = state.metadata.get("problem_id") or state.sample_id
-        meta["submitted"] = submitted(state)
+        meta["submitted"] = bool(answers)
+        meta["n_submissions"] = len(answers)
+        meta["attempt_grades"] = attempt_grades
+        meta["first_attempt_correct"] = (
+            None if attempt_grades[0] is None else attempt_grades[0] == CORRECT
+        )
+        meta["graded_last_submission"] = graded_last
+        meta["grader_attempts"] = grader_attempts
         meta["stop_reason"] = state.output.stop_reason if state.output else None
         if telemetry:
             meta["sandbox_resources"] = await sandbox_resources()
@@ -116,12 +190,27 @@ def biomystery_grader(
     return score
 
 
-def submitted(state: TaskState) -> bool:
-    """Whether the agent called the submit tool during the sample."""
-    return any(
-        isinstance(m, ChatMessageTool) and m.function == SUBMIT_TOOL
+def submissions(state: TaskState) -> list[str]:
+    """The text of each submit tool call in the sample, in order."""
+    return [
+        m.text
         for m in state.messages
-    )
+        if isinstance(m, ChatMessageTool) and m.function == SUBMIT_TOOL
+    ]
+
+
+def _with_completion(state: TaskState, answer: str) -> TaskState:
+    """A shallow copy of `state` whose output completion is `answer`."""
+    graded = copy(state)
+    graded.output = state.output.model_copy(update={"completion": answer})
+    return graded
+
+
+def _grade(value: Value) -> Value | None:
+    """A score value, or None when the score is unscored (NaN)."""
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    return value
 
 
 async def sandbox_resources() -> dict[str, int | None] | None:

@@ -40,7 +40,7 @@ from inspect_ai.solver import Solver
 
 from biomysterybench.manifest import TIERS, ProblemArchive, load_source
 from biomysterybench.scorer import biomystery_grader
-from biomysterybench.solver import biomystery_solver
+from biomysterybench.solver import DEFAULT_MAX_ATTEMPTS, biomystery_solver
 from biomysterybench.staging import DATA_SOURCES, stage_problem_data
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ _YES = {"yes", "true", "1", "y"}
 # "<comparability>-<interface>": the number changes when results stop being
 # comparable with earlier runs, and the letter changes when task arguments change
 # incompatibly. See the changelog in README.md.
-TASK_VERSION = "2-B"
+TASK_VERSION = "3-B"
 
 
 def _load_problems(repo: str, revision: str, token: str | None) -> list[dict[str, str]]:
@@ -141,13 +141,20 @@ def _create_task(
     *,
     sandbox: str | tuple[str, str] | None = None,
     epochs: int = 1,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     metadata: dict[str, Any] | None = None,
 ) -> Task:
-    """Assemble the Task (shared with tests, which inject a MemoryDataset)."""
+    """Assemble the Task (shared with tests, which inject a MemoryDataset).
+
+    `max_attempts` must match the solver's, so the grader knows whether the
+    transcript can hold earlier, incorrect submissions.
+    """
     return Task(
         dataset=dataset,
         solver=solver,
-        scorer=biomystery_grader(telemetry=sandbox is not None),
+        scorer=biomystery_grader(
+            telemetry=sandbox is not None, max_attempts=max_attempts
+        ),
         epochs=Epochs(epochs, "mean"),
         sandbox=sandbox,
         version=TASK_VERSION,
@@ -175,6 +182,7 @@ def bio_mystery_bench(
     message_limit: int | None = 150,
     token_limit: int | None = None,
     max_tool_output: int | None = None,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> Task:
     """BioMysteryBench as an Inspect task.
 
@@ -215,16 +223,23 @@ def bio_mystery_bench(
             without a sandbox, for registration and offline tests.
         epochs: trials per problem.
         tool_timeout: per bash/python call timeout in seconds (passed to the solver).
-        message_limit: hard cap on messages per sample
-        token_limit: optional per-sample token cap (passed to the solver).
+        message_limit: hard cap on messages per sample, shared by all submissions.
+        token_limit: optional per-sample token cap on the agent (passed to the
+            solver). Grader tokens do not count toward it.
         max_tool_output: truncate each tool result to this many bytes (passed to the
             solver).
+        max_attempts: submissions the agent may make per sample. After a wrong
+            one it is told only that the answer was incorrect. 1 is upstream's
+            one-shot protocol. It is independent of `epochs`: for pass@k, run
+            max_attempts=1 with epochs=k.
 
     """
     if source not in ("full", "preview"):
         raise ValueError(f"source must be 'full' or 'preview', got {source!r}")
     if limit is not None and limit < 0:
         raise ValueError(f"limit must be zero or more, got {limit}")
+    if max_attempts < 1:
+        raise ValueError(f"max_attempts must be 1 or more, got {max_attempts}")
     if not _MEMORY_RE.match(sandbox_memory):
         raise ValueError(
             "sandbox_memory must be a docker compose byte value such as '32G' or "
@@ -330,6 +345,7 @@ def bio_mystery_bench(
         max_tool_output=max_tool_output,
         check_data=with_sandbox,
         stage=stage,
+        max_attempts=max_attempts,
     )
     compose = _COMPOSE_DISK if sandbox_disk is not None else _COMPOSE
     return _create_task(
@@ -337,7 +353,9 @@ def bio_mystery_bench(
         solver,
         sandbox=("docker", compose) if with_sandbox else None,
         epochs=epochs,
+        max_attempts=max_attempts,
         metadata={
+            "max_attempts": max_attempts,
             "data_source": data_source,
             "base_image": base if staged else None,
             "image_prefix": None if staged else prefix,

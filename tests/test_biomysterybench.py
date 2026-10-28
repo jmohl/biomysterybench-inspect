@@ -16,7 +16,7 @@ import yaml
 from inspect_ai import eval
 from inspect_ai.dataset import MemoryDataset, Sample
 from inspect_ai.log import EvalLog
-from inspect_ai.model import ModelOutput, get_model
+from inspect_ai.model import ModelOutput, ModelUsage, get_model
 from inspect_ai.scorer import CORRECT, INCORRECT, Score
 from inspect_ai.solver import Generate, TaskState, solver
 
@@ -99,6 +99,7 @@ def _fake_state(human_solvable="yes", pid="hb002"):
         messages=[],
         metadata={"human_solvable": human_solvable, "problem_id": pid},
         sample_id=pid,
+        completed=True,
     )
 
 
@@ -151,7 +152,9 @@ def test_unsubmitted_sample_is_flagged_and_its_limit_logged(tmp_path):
         ]
     )
     task = bmb._create_task(
-        dataset, biomystery_solver(message_limit=6, check_data=False)
+        dataset,
+        biomystery_solver(message_limit=6, check_data=False, max_attempts=1),
+        max_attempts=1,
     )
 
     [log] = eval(
@@ -171,6 +174,240 @@ def test_unsubmitted_sample_is_flagged_and_its_limit_logged(tmp_path):
     assert stalled.scores["biomystery_grader"].metadata["submitted"] is False
     assert stalled.scores["biomystery_grader"].value == INCORRECT
     assert stalled.limit is not None and stalled.limit.type == "message"
+
+
+# --- multiple submissions (mock agent and grader) ----------------------------
+
+RIGHT, WRONG = "Bacillus licheniformis", "Bacillus subtilis"
+
+
+def _submitting_agent(answers):
+    """Agent that submits answers[i] as its i-th submission, then keeps talking."""
+
+    def agent(messages, tools, tool_choice, config):
+        n = sum(1 for m in messages if getattr(m, "function", None) == "submit")
+        if n < len(answers):
+            return ModelOutput.for_tool_call(
+                "mockllm/model", "submit", {"answer": answers[n]}
+            )
+        return ModelOutput.from_content("mockllm/model", "Still analysing the data.")
+
+    return agent
+
+
+def _grader_accepting(answer):
+    """Grader that grades C exactly when the submitted answer is `answer`."""
+
+    def grader(messages, tools, tool_choice, config):
+        ok = f"[Final submitted answer]: {answer}\n" in messages[-1].text
+        return ModelOutput.from_content(
+            "mockllm/model", f"Reasoning.\nGRADE: {'C' if ok else 'I'}"
+        )
+
+    return grader
+
+
+def _run_attempts(tmp_path, agent, grader, max_attempts, epochs=1, **solver_args):
+    dataset = MemoryDataset([Sample(input="Which organism?", target="rubric", id="x")])
+    solver_args.setdefault("message_limit", 40)
+    task = bmb._create_task(
+        dataset,
+        biomystery_solver(check_data=False, max_attempts=max_attempts, **solver_args),
+        epochs=epochs,
+        max_attempts=max_attempts,
+    )
+    [log] = eval(
+        tasks=[task],
+        model=get_model("mockllm/model", custom_outputs=agent),
+        model_roles={"grader": get_model("mockllm/model", custom_outputs=grader)},
+        log_dir=str(tmp_path),
+    )
+    assert_eval_success(log, min_samples=epochs)
+    assert log.samples is not None
+    return log.samples
+
+
+def _intermediate_scores(sample):
+    return [e for e in sample.events if e.event == "score" and e.intermediate]
+
+
+def _incorrect_replies(sample):
+    return [
+        m
+        for m in sample.messages
+        if m.role == "user" and m.text == solving.INCORRECT_SUBMISSION_MESSAGE
+    ]
+
+
+def test_wrong_then_right_submission_stops_the_loop(tmp_path):
+    [sample] = _run_attempts(
+        tmp_path, _submitting_agent([WRONG, RIGHT]), _grader_accepting(RIGHT), 5
+    )
+    score = sample.scores["biomystery_grader"]
+    assert score.value == CORRECT
+    assert score.metadata["n_submissions"] == 2
+    # Both submissions graded mid-run, then the correct one graded again.
+    assert score.metadata["attempt_grades"] == [INCORRECT, CORRECT, CORRECT]
+    assert score.metadata["first_attempt_correct"] is False
+    assert score.metadata["graded_last_submission"] is False
+    assert len(_intermediate_scores(sample)) == 2
+    # The loop ends on the correct submission.
+    assert sample.messages[-1].role == "tool"
+    # The model hears only the generic message, never the grader's reasoning.
+    [reply] = _incorrect_replies(sample)
+    assert "Reasoning" not in reply.text and "GRADE" not in reply.text
+
+
+def test_always_wrong_stops_after_max_attempts(tmp_path):
+    [sample] = _run_attempts(
+        tmp_path, _submitting_agent([WRONG] * 10), _grader_accepting(RIGHT), 5
+    )
+    score = sample.scores["biomystery_grader"]
+    assert score.value == INCORRECT
+    assert score.metadata["n_submissions"] == 5
+    # The 5th submission is graded only at the end of the sample.
+    assert len(_intermediate_scores(sample)) == 4
+    assert len(_incorrect_replies(sample)) == 4
+    assert score.metadata["attempt_grades"] == [INCORRECT] * 5
+    assert sample.limit is None
+
+
+def test_one_attempt_keeps_the_one_shot_protocol(tmp_path):
+    [sample] = _run_attempts(
+        tmp_path, _submitting_agent([WRONG, RIGHT]), _grader_accepting(RIGHT), 1
+    )
+    score = sample.scores["biomystery_grader"]
+    assert score.value == INCORRECT
+    assert score.metadata["n_submissions"] == 1
+    assert score.metadata["attempt_grades"] == [INCORRECT]
+    assert score.metadata["first_attempt_correct"] is False
+    assert _intermediate_scores(sample) == []
+    assert _incorrect_replies(sample) == []
+    assert scoring.ATTEMPTS_KEY not in sample.metadata
+
+
+@pytest.mark.parametrize("max_attempts", [1, 2])
+def test_epochs_are_independent_runs(tmp_path, max_attempts):
+    """max_attempts=1 with epochs=k gives k independent one-shot runs (pass@k).
+
+    Each epoch keeps its own attempt record; nothing carries over between them.
+    """
+    samples = _run_attempts(
+        tmp_path,
+        _submitting_agent([WRONG] * 10),
+        _grader_accepting(RIGHT),
+        max_attempts,
+        epochs=2,
+    )
+    assert sorted(s.epoch for s in samples) == [1, 2]
+    for sample in samples:
+        score = sample.scores["biomystery_grader"]
+        assert score.metadata["n_submissions"] == max_attempts
+        assert score.metadata["attempt_grades"] == [INCORRECT] * max_attempts
+        assert len(_intermediate_scores(sample)) == max_attempts - 1
+
+
+def test_limit_after_a_wrong_submission_grades_the_last_submission(tmp_path):
+    """The message limit ends the sample after a wrong submission.
+
+    The model's last text is not an answer, so the grader is given the last
+    submission. The logged output and transcript are left as they were.
+    """
+    [sample] = _run_attempts(
+        tmp_path,
+        _submitting_agent([WRONG]),
+        _grader_accepting(RIGHT),
+        5,
+        message_limit=8,
+    )
+    assert sample.limit is not None and sample.limit.type == "message"
+    score = sample.scores["biomystery_grader"]
+    # Score.answer is the answer the grader was given.
+    assert score.answer == WRONG
+    assert score.value == INCORRECT
+    assert score.metadata["graded_last_submission"] is True
+    assert score.metadata["n_submissions"] == 1
+    assert score.metadata["attempt_grades"] == [INCORRECT, INCORRECT]
+    assert sample.output.completion == "Still analysing the data."
+    assert sample.messages[-1].role == "assistant"
+    assert sample.messages[-1].text == "Still analysing the data."
+
+
+def _grader_outputs(*completions):
+    return [ModelOutput.from_content("mockllm/model", c) for c in completions]
+
+
+def test_grader_is_asked_again_when_it_gives_no_grade(tmp_path):
+    [sample] = _run_attempts(
+        tmp_path,
+        _submitting_agent([RIGHT]),
+        _grader_outputs("No verdict.", "No verdict.", "Reasoning.\nGRADE: C"),
+        1,
+    )
+    score = sample.scores["biomystery_grader"]
+    assert score.value == CORRECT
+    assert score.metadata["grader_attempts"] == 3
+
+
+def test_unscored_intermediate_grade_counts_as_incorrect(tmp_path):
+    """A mid-run grade the grader never gave tells the agent it was wrong."""
+    [sample] = _run_attempts(
+        tmp_path,
+        _submitting_agent([RIGHT, RIGHT]),
+        _grader_outputs(
+            *["No verdict."] * scoring.MAX_GRADER_ATTEMPTS,
+            "Reasoning.\nGRADE: C",
+            "Reasoning.\nGRADE: C",
+        ),
+        5,
+    )
+    score = sample.scores["biomystery_grader"]
+    assert score.value == CORRECT
+    assert score.metadata["attempt_grades"] == [None, CORRECT, CORRECT]
+    assert score.metadata["first_attempt_correct"] is None
+    assert len(_incorrect_replies(sample)) == 1
+
+
+def test_grader_tokens_do_not_count_toward_the_token_limit(tmp_path):
+    """Mid-run grades use far more tokens than the limit and do not end the run."""
+
+    def grader(messages, tools, tool_choice, config):
+        output = ModelOutput.from_content("mockllm/model", "Reasoning.\nGRADE: I")
+        output.usage = ModelUsage(
+            input_tokens=1_000_000, output_tokens=10, total_tokens=1_000_010
+        )
+        return output
+
+    [sample] = _run_attempts(
+        tmp_path,
+        _submitting_agent([WRONG] * 10),
+        grader,
+        3,
+        token_limit=100_000,
+    )
+    assert sample.limit is None
+    assert sample.scores["biomystery_grader"].metadata["n_submissions"] == 3
+
+
+def test_max_attempts_must_be_positive():
+    with pytest.raises(ValueError, match="max_attempts must be 1 or more"):
+        biomystery_solver(max_attempts=0)
+    with pytest.raises(ValueError, match="max_attempts must be 1 or more"):
+        bio_mystery_bench(source="preview", max_attempts=0, with_sandbox=False)
+
+
+@pytest.mark.parametrize("max_attempts, noted", [(1, False), (5, True)])
+def test_grader_is_told_about_earlier_submissions(monkeypatch, max_attempts, noted):
+    captured = {}
+
+    def fake_model_graded_qa(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(scoring, "model_graded_qa", fake_model_graded_qa)
+    scoring.biomystery_grader(max_attempts=max_attempts)
+    assert (scoring.BMB_MULTI_ATTEMPT_NOTE in captured["instructions"]) is noted
+    assert captured["instructions"].endswith(scoring.BMB_GRADER_INSTRUCTIONS)
 
 
 # --- sample mapping + selection (no network) ---------------------------------
@@ -341,7 +578,8 @@ def test_grader_refusal_leaves_sample_unscored(tmp_path):
     The grader's safety classifier can stop it on biological content with
     stop_reason content_filter and an empty completion. That sample was never
     judged, so it must be unscored (NaN, excluded from metrics), not INCORRECT.
-    This relies on inspect-ai 0.3.245 or later.
+    This relies on inspect-ai 0.3.245 or later. The grader is asked
+    MAX_GRADER_ATTEMPTS times before the sample is left unscored.
     """
     dataset = MemoryDataset(
         [
@@ -350,13 +588,14 @@ def test_grader_refusal_leaves_sample_unscored(tmp_path):
         ]
     )
     task = bmb._create_task(dataset, mock_solver_with_output("Ebola virus"))
+    refusal = ModelOutput.from_content(
+        model="mockllm/model", content="", stop_reason="content_filter"
+    )
     grader = get_model(
         "mockllm/model",
         custom_outputs=[
             ModelOutput.from_content(model="mockllm/model", content="GRADE: C"),
-            ModelOutput.from_content(
-                model="mockllm/model", content="", stop_reason="content_filter"
-            ),
+            *[refusal] * scoring.MAX_GRADER_ATTEMPTS,
         ],
     )
 
@@ -379,6 +618,7 @@ def test_grader_refusal_leaves_sample_unscored(tmp_path):
     # older ones in metadata["unscored_reason"].
     assert getattr(refused, "reason", None) or refused.metadata.get("unscored_reason")
     assert refused.metadata["problem_id"] == "hb019"
+    assert refused.metadata["grader_attempts"] == scoring.MAX_GRADER_ATTEMPTS
     assert log.results is not None
     [result] = log.results.scores
     assert result.scored_samples == 1

@@ -33,6 +33,16 @@ DEFAULT_SYSTEM_PROMPT = (
 
 SUBMIT_DESCRIPTION = "Submit your final answer to the question, formatted exactly as the question requests."
 
+# Reply to a submission that was not graded correct, when the agent has
+# submissions left. It must never carry the grader's explanation or the rubric.
+INCORRECT_SUBMISSION_MESSAGE = (
+    "Your submission was incorrect. Please proceed and attempt to find the correct "
+    "answer."
+)
+
+# Submissions the agent may make per sample. 1 is upstream's one-shot protocol.
+DEFAULT_MAX_ATTEMPTS = 5
+
 DATA_DIR = "data"
 
 # Name of the agent's submit tool. The scorer reads it to tell whether the
@@ -80,8 +90,15 @@ def biomystery_solver(
     submit_description: str | None = None,
     check_data: bool = True,
     stage: Solver | None = None,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> Solver:
     """Open-ended agentic solver for BioMysteryBench.
+
+    The agent may submit up to `max_attempts` times. Every submission but the
+    last is graded as soon as it is made, by the task's own scorer. A correct
+    one ends the sample. Otherwise the agent is told only that the submission
+    was incorrect and keeps working. The last submission is graded at the end
+    of the sample like any other.
 
     Args:
         tool_timeout: per bash/python call timeout in seconds. Alignment, variant
@@ -100,7 +117,11 @@ def biomystery_solver(
         stage: setup solver that puts the problem data into the sandbox before
             the check (see staging.stage_problem_data). None when the image
             already holds the data.
+        max_attempts: submissions accepted per sample (1 = one-shot, as
+            upstream). The message and token limits are shared by all of them.
     """
+    if max_attempts < 1:
+        raise ValueError(f"max_attempts must be 1 or more, got {max_attempts}")
     resolved_system = DEFAULT_SYSTEM_PROMPT if system_prompt is None else system_prompt
     init: list[Solver] = []
     if stage is not None:
@@ -113,7 +134,8 @@ def biomystery_solver(
     return basic_agent(
         init=init,
         tools=[bash(timeout=tool_timeout), python(timeout=tool_timeout), think()],
-        max_attempts=1,  # one-shot: no correctness feedback loop
+        max_attempts=max_attempts,
+        incorrect_message=INCORRECT_SUBMISSION_MESSAGE,
         message_limit=message_limit,
         token_limit=token_limit,
         max_tool_output=max_tool_output,
